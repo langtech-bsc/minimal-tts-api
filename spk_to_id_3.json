@@ -1,0 +1,18 @@
+{
+  "balear":{
+    "quim": 0,
+    "olga": 1
+  },
+  "central":{
+    "grau": 2,
+    "elia": 3
+  },
+  "nord-occidental":{
+    "pere": 4,
+    "emma": 5
+  },
+  "valencia":{  
+    "lluc": 6,
+    "gina": 7
+  }
+}

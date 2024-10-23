@@ -1,0 +1,8 @@
+onnxruntime
+phonemizer
+torch
+unidecode
+fastapi
+soundfile
+huggingface_hub[cli]
+uvicorn
