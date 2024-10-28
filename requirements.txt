@@ -1,6 +1,6 @@
 onnxruntime
 phonemizer
-torch
+scipy
 unidecode
 fastapi
 soundfile

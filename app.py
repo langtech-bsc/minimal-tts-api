@@ -1,7 +1,8 @@
 import numpy as np
 import onnxruntime
 from text import text_to_sequence, sequence_to_text
-import torch
+from scipy.fft import irfft
+from scipy.signal.windows import hann
 import yaml
 import json
 import os
@@ -53,16 +54,24 @@ def intersperse(lst, item):
     result[1::2] = lst
     return result
 
-def process_text(text: str, cleaner: str):
-    x = torch.tensor(
-        intersperse(text_to_sequence(text, [cleaner]), 0),
-        dtype=torch.long,
-        device="cpu",
-    )[None]
-    x_lengths = torch.tensor([x.shape[-1]], dtype=torch.long, device="cpu")
-    return x.numpy(), x_lengths.numpy()
 
+def process_text(text: str, cleaner: str):
+    # Convert text to sequence and intersperse with 0
+    text_sequence = text_to_sequence(text, [cleaner])
+    interspersed_sequence = intersperse(text_sequence, 0)
+
+    # Convert to NumPy array
+    x = np.array(interspersed_sequence, dtype=np.int64)[None]
+    x_lengths = np.array([x.shape[-1]], dtype=np.int64)
+    x_phones = sequence_to_text(x.squeeze(0).tolist())
+
+    print(x_phones)
+    return x, x_lengths
+
+# inference w/o torch 
+# source https://github.com/OpenVoiceOS/ovos-tts-plugin-matxa-multispeaker-cat/blob/dev/ovos_tts_plugin_matxa_multispeaker_cat/tts.py 
 def vocos_inference(mel, denoise=True):
+
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 
@@ -71,55 +80,72 @@ def vocos_inference(mel, denoise=True):
     hop_length = params["hop_length"]
     win_length = n_fft
 
+    # ONNX inference
     mag, x, y = model_vocos.run(None, {"mels": mel})
+
+    # Complex spectrogram from vocos output
     spectrogram = mag * (x + 1j * y)
-    window = torch.hann_window(win_length)
+    window = hann(win_length, sym=False)
 
     if denoise:
-        mel_rand = torch.zeros_like(torch.tensor(mel))
-        mag_bias, x_bias, y_bias = model_vocos.run(None, {"mels": mel_rand.float().numpy()})
+        # Vocoder bias
+        mel_rand = np.zeros_like(mel)
+        mag_bias, x_bias, y_bias = model_vocos.run(
+            None,
+            {
+                "mels": mel_rand.astype(np.float32)
+            },
+        )
+
+        # Complex spectrogram from vocos output
         spectrogram_bias = mag_bias * (x_bias + 1j * y_bias)
-        
-        spec = torch.view_as_real(torch.tensor(spectrogram))
-        mag_spec = torch.sqrt(spec.pow(2).sum(-1))
-        
-        spec_bias = torch.view_as_real(torch.tensor(spectrogram_bias))
-        mag_spec_bias = torch.sqrt(spec_bias.pow(2).sum(-1))
-        
+
+        # Denoising
+        spec = np.stack([np.real(spectrogram), np.imag(spectrogram)], axis=-1)
+        # Get magnitude of vocos spectrogram
+        mag_spec = np.sqrt(np.sum(spec ** 2, axis=-1))
+
+        # Get magnitude of bias spectrogram
+        spec_bias = np.stack([np.real(spectrogram_bias), np.imag(spectrogram_bias)], axis=-1)
+        mag_spec_bias = np.sqrt(np.sum(spec_bias ** 2, axis=-1))
+
+        # Subtract
         strength = 0.0025
         mag_spec_denoised = mag_spec - mag_spec_bias * strength
-        mag_spec_denoised = torch.clamp(mag_spec_denoised, 0.0)
-        
-        angle = torch.atan2(spec[..., -1], spec[..., 0])
-        spectrogram = torch.complex(mag_spec_denoised * torch.cos(angle), 
-                                  mag_spec_denoised * torch.sin(angle))
+        mag_spec_denoised = np.clip(mag_spec_denoised, 0.0, None)
 
+        # Return to complex spectrogram from magnitude
+        angle = np.arctan2(np.imag(spectrogram), np.real(spectrogram))
+        spectrogram = mag_spec_denoised * (np.cos(angle) + 1j * np.sin(angle))
+
+    # Inverse STFT
     pad = (win_length - hop_length) // 2
-    spectrogram = torch.tensor(spectrogram)
     B, N, T = spectrogram.shape
 
-    ifft = torch.fft.irfft(spectrogram, n_fft, dim=1, norm="backward")
-    ifft = ifft * window[None, :, None]
+    # Inverse FFT
+    ifft = irfft(spectrogram, n=n_fft, axis=1)
+    ifft *= window[None, :, None]
 
+    # Overlap and Add
     output_size = (T - 1) * hop_length + win_length
-    y = torch.nn.functional.fold(
-        ifft, 
-        output_size=(1, output_size), 
-        kernel_size=(1, win_length), 
-        stride=(1, hop_length),
-    )[:, 0, 0, pad:-pad]
+    y = np.zeros((B, output_size))
+    for b in range(B):
+        for t in range(T):
+            y[b, t * hop_length:t * hop_length + win_length] += ifft[b, :, t]
 
-    window_sq = window.square().expand(1, T, -1).transpose(1, 2)
-    window_envelope = torch.nn.functional.fold(
-        window_sq, 
-        output_size=(1, output_size), 
-        kernel_size=(1, win_length), 
-        stride=(1, hop_length),
-    ).squeeze()[pad:-pad]
+    # Window envelope
+    window_sq = np.expand_dims(window ** 2, axis=0)
+    window_envelope = np.zeros((B, output_size))
+    for b in range(B):
+        for t in range(T):
+            window_envelope[b, t * hop_length:t * hop_length + win_length] += window_sq[0]
 
-    assert (window_envelope > 1e-11).all()
-    y = y / window_envelope
-    
+    # Normalize
+    if np.any(window_envelope <= 1e-11):
+        print("Warning: Some window envelope values are very small.")
+
+    y /= np.maximum(window_envelope, 1e-11)  # Prevent division by very small values
+
     return y
 
 class TTSRequest(BaseModel):
@@ -162,7 +188,7 @@ async def generate_audio(text: str, accent: str, spk_name: str,
     mel, mel_lengths = model_matcha_mel_all.run(None, inputs)
     wavs_vocos = vocos_inference(mel, denoise=True)
     
-    return wavs_vocos.squeeze(0).numpy()
+    return wavs_vocos.squeeze(0)
 
 async def stream_wav_generator(wav_buffer):
     CHUNK_SIZE = 4096  # Adjust chunk size as needed
