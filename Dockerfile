@@ -41,11 +41,8 @@ COPY --chown=user requirements.txt $HOME/app/
 RUN pip install -r requirements.txt
 
 # download from hf hub
-RUN huggingface-cli download projecte-aina/matxa-tts-cat-multiaccent matcha_multispeaker_cat_all_opset_15_10_steps.onnx --local-dir  $HOME/app/
+RUN huggingface-cli download projecte-aina/matxa-tts-cat-multiaccent matxa_multiaccent_wavenext_e2e.onnx --local-dir  $HOME/app/
 RUN huggingface-cli download projecte-aina/matxa-tts-cat-multiaccent config.yaml--local-dir  $HOME/app/
-
-RUN huggingface-cli download projecte-aina/alvocat-vocos-22khz  mel_spec_22khz_cat.onnx --local-dir $HOME/app/
-RUN huggingface-cli download projecte-aina/alvocat-vocos-22khz  config.yaml --local-dir $HOME/app/
 
 COPY --chown=user . $HOME/app/
 
@@ -56,6 +53,4 @@ USER user
 
 EXPOSE 7860
 
-CMD ["python3", "-u", "app.py"] 
-
-
+CMD ["python3", "-u", "app.py"]
