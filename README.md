@@ -3,7 +3,7 @@ Simple Fastapi example to make inference with tts models in onnx format.
 Steps: 
 
 1. Clone the repo.
-`git clone https://github.com/langtech-bsc/minimal-tts-api`
+`git clone -b wavenext_e2e https://github.com/langtech-bsc/minimal-tts-api`
 2. Build and run the container.
 ```
 cd minimal-tts-api
