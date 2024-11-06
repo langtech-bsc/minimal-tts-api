@@ -137,6 +137,11 @@ async def stream_wav_generator(wav_buffer):
         yield data
 
 
+@app.get("/health")
+def health_check():
+    return "Running"
+
+
 @app.post("/api/tts")
 async def tts(request: TTSRequest):
     if len(request.text) > 500:
