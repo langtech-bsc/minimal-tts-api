@@ -13,6 +13,6 @@ docker run -p 8000:8000 -t minimal-tts-api
 3. Test with a simple request.
 
 ```
-curl -X POST   http://0.0.0.0:8000/api/tts   -H "Content-Type: application/json"   -d '{"text":"Bon dia","voice":"quim","accent":"balear","type":"text"}'   | play -t wav -
+curl -X POST   http://0.0.0.0:8000/api/tts   -H "Content-Type: application/json"   -d '{"text":"Bon dia","voice":"quim","accent":"balear","type":"text"}'   | aplay -t wav -
 
 ```
