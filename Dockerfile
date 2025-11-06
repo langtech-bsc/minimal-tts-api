@@ -41,8 +41,8 @@ COPY --chown=user requirements.txt $HOME/app/
 RUN pip install -r requirements.txt
 
 # download from hf hub
-RUN huggingface-cli download projecte-aina/matxa-tts-cat-multiaccent matxa_multiaccent_wavenext_e2e.onnx --local-dir  $HOME/app/
-RUN huggingface-cli download projecte-aina/matxa-tts-cat-multiaccent config.yaml--local-dir  $HOME/app/
+RUN hf download projecte-aina/matxa-tts-cat-multiaccent matxa_multiaccent_wavenext_e2e.onnx --local-dir  $HOME/app/
+RUN hf download projecte-aina/matxa-tts-cat-multiaccent config.yaml--local-dir  $HOME/app/
 
 COPY --chown=user . $HOME/app/
 
