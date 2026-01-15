@@ -3,12 +3,19 @@ import onnxruntime
 from text import text_to_sequence, sequence_to_text
 import json
 import os
-from fastapi import FastAPI, Response
+import re
+from fastapi import FastAPI, Response, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import io
 import wave
 from time import perf_counter
+import logging
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("uvicorn.error")
+
 
 app = FastAPI()
 
@@ -51,6 +58,39 @@ cleaners = {
     "central": "catalan_cleaners"
 }
 
+API_KEY = os.environ.get("API_KEY", "")  # si lo pones, exige Bearer token
+
+def parse_openai_voice(voice: str | None, default_accent: str, default_voice: str):
+    """
+    Accepts:
+      - "quim"
+      - "balear/quim"
+      - "central-elia" / "central_el ia" (normaliza separadores)
+    Returns (accent, spk_name)
+    """
+    if not voice:
+        return default_accent, default_voice
+
+    v = voice.strip().lower()
+    v = re.sub(r"[\s_]+", "-", v)
+    v = v.replace("-", "/") if "/" not in v else v  # "central-elia" -> "central/elia"
+
+    if "/" in v:
+        accent, spk = v.split("/", 1)
+        # normaliza alias comunes
+        if accent in ("nordoccidental", "nord-occidental", "occidental"):
+            accent = "nord-occidental"
+        if accent in ("valencia", "valencià", "valencian"):
+            accent = "valencia"
+        if accent in ("balear",):
+            accent = "balear"
+        if accent in ("central",):
+            accent = "central"
+        return accent, spk
+
+    # si solo viene nombre, usa defaults
+    return default_accent, v
+
 
 def intersperse(lst, item):
     result = [item] * (len(lst) * 2 + 1)
@@ -79,6 +119,13 @@ class TTSRequest(BaseModel):
     temperature: float = 0.2
     length_scale: float = 0.89
     type: str = "text"
+
+class OpenAISpeechRequest(BaseModel):
+    model: str | None = None
+    input: str
+    voice: str | None = None
+    response_format: str | None = "wav"
+    speed: float | None = 1.0  # lo aceptamos, pero este backend no lo usa
 
 
 def create_wav_header(audio_data):
@@ -136,6 +183,10 @@ async def stream_wav_generator(wav_buffer):
             break
         yield data
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.warning("HTTP %s %s -> %s", request.method, request.url.path, exc.detail)
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.get("/health")
 def health_check():
@@ -172,6 +223,70 @@ async def tts(request: TTSRequest):
 
     except Exception as e:
         return Response(content=str(e), status_code=500)
+
+
+@app.get("/v1/models")
+def list_models():
+    return {
+        "object": "list",
+        "data": [{"id": "matxa-tts-cat-multiaccent", "object": "model"}],
+    }
+
+
+@app.post("/v1/audio/speech")
+async def openai_audio_speech(req: OpenAISpeechRequest, authorization: str | None = Header(default=None)):
+    # Auth opcional estilo OpenAI
+    if API_KEY:
+        if not authorization or authorization.strip() != f"Bearer {API_KEY}":
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if req.response_format and req.response_format.lower() not in ("wav", "wave"):
+        raise HTTPException(status_code=400, detail="Only wav is supported by this server right now.")
+
+    if len(req.input) > 500:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 500 characters allowed.")
+
+    accent, spk = parse_openai_voice(req.voice, DEFAULT_ACCENT, DEFAULT_SPEAKER_ID)
+
+    if accent not in speaker_id_dict or spk not in speaker_id_dict.get(accent, {}):
+        # si no especificó acento, intenta encontrar la voz en cualquiera
+        if req.voice and "/" not in req.voice:
+            found = [(a, spk) for a, m in speaker_id_dict.items() if spk in m]
+            if len(found) == 1:
+                accent, spk = found[0]
+            elif len(found) > 1:
+                raise HTTPException(400, detail=f"Voice '{spk}' exists in multiple accents: {[a for a,_ in found]}. Use 'accent/voice'.")
+            else:
+                raise HTTPException(400, detail=f"Unknown voice '{spk}'.")
+        else:
+            raise HTTPException(400, detail=f"Unknown voice '{spk}' for accent '{accent}'.")
+
+
+    if accent not in cleaners:
+        raise HTTPException(status_code=400, detail=f"Unknown accent '{accent}'. Use one of: {list(cleaners.keys())}")
+
+    if accent not in speaker_id_dict or spk not in speaker_id_dict[accent]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown voice '{spk}' for accent '{accent}'."
+        )
+
+    audio_data = await generate_audio(
+        text=req.input,
+        accent=accent,
+        spk_name=spk,
+        temperature=0.2,
+        length_scale=0.89
+    )
+
+    wav_buffer = create_wav_header(audio_data)
+    wav_buffer.seek(0)
+
+    return Response(
+        content=wav_buffer.read(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="speech.wav"'}
+    )
 
 
 if __name__ == "__main__":
